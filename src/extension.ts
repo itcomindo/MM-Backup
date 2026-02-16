@@ -2,13 +2,19 @@ import * as vscode from 'vscode';
 import { BackupManager } from './BackupManager';
 
 export function activate(context: vscode.ExtensionContext) {
-    // Register Command
-    let disposable = vscode.commands.registerCommand('mm-backup.makeBackup', async () => {
-        const manager = new BackupManager();
+    const manager = new BackupManager();
+
+    // Command 1: Backup
+    let backupCmd = vscode.commands.registerCommand('mm-backup.makeBackup', async () => {
         await manager.performBackup();
     });
 
-    context.subscriptions.push(disposable);
+    // Command 2: Restore
+    let restoreCmd = vscode.commands.registerCommand('mm-backup.restoreBackup', async () => {
+        await manager.restoreBackup();
+    });
+
+    context.subscriptions.push(backupCmd, restoreCmd);
 }
 
 export function deactivate() { }

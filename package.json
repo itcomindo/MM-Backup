@@ -1,8 +1,8 @@
 {
   "name": "mm-backup",
   "displayName": "MM Backup",
-  "description": "Ekstensi Vs Code untuk melakukan backup file secara dinamis sebelum refactor.",
-  "version": "1.0.0",
+  "description": "Ekstensi Vs Code untuk melakukan backup & restore file secara dinamis.",
+  "version": "1.0.1",
   "publisher": "CodeF",
   "author": {
     "name": "Budi Haryono"
@@ -26,6 +26,10 @@
       {
         "command": "mm-backup.makeBackup",
         "title": "MM Backup: Backup Current File"
+      },
+      {
+        "command": "mm-backup.restoreBackup",
+        "title": "MM Backup: Restore File"
       }
     ]
   },
