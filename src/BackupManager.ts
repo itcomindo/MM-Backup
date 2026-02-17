@@ -1,17 +1,26 @@
 import * as vscode from 'vscode';
 import * as path from 'path';
 
-interface BackupFile {
-    label: string;      // Nama file backup (misal: style-mbu-5.css)
-    description: string; // Info waktu (misal: 12:30 PM - 2 minutes ago)
-    uri: vscode.Uri;    // Lokasi file backup
-    version: number;    // Angka urutan backup
+// Interface untuk QuickPick Item saat Restore
+interface BackupFileItem extends vscode.QuickPickItem {
+    uri: vscode.Uri;
+    version: number;
+}
+
+// Interface untuk struktur JSON Log
+interface BackupLog {
+    [filename: string]: {
+        originalFile: string;
+        description: string;
+        timestamp: string;
+    }
 }
 
 export class BackupManager {
     private readonly backupFolderName = 'MM-Backup';
+    private readonly logFileName = 'backup-log.json';
 
-    // --- FITUR 1: BACKUP ---
+    // --- FITUR 1: BACKUP DENGAN DESKRIPSI ---
     public async performBackup() {
         const editor = vscode.window.activeTextEditor;
         if (!editor) {
@@ -21,7 +30,7 @@ export class BackupManager {
 
         const document = editor.document;
         if (document.isUntitled || document.uri.scheme !== 'file') {
-            vscode.window.showWarningMessage('MM Backup: File harus disimpan di disk terlebih dahulu.');
+            vscode.window.showWarningMessage('MM Backup: Simpan file ke disk terlebih dahulu.');
             return;
         }
 
@@ -31,11 +40,22 @@ export class BackupManager {
             return;
         }
 
+        // UX: Minta Deskripsi (Keyboard First)
+        // User mengetik alasan, Enter untuk lanjut. Escape untuk skip (kosong).
+        const description = await vscode.window.showInputBox({
+            placeHolder: 'Masukkan deskripsi/alasan backup (Opsional)',
+            title: 'MM Backup Description',
+            prompt: 'Contoh: Refactor header, Fix bug login, Experimental change'
+        });
+
+        // Jika user menekan Escape (undefined), kita anggap string kosong
+        const finalDesc = description || 'No description provided';
+
         const rootUri = workspaceFolder.uri;
         const backupFolderUri = vscode.Uri.joinPath(rootUri, this.backupFolderName);
 
         try {
-            // Cek folder backup
+            // Cek/Buat Folder Backup & Gitignore
             try { await vscode.workspace.fs.stat(backupFolderUri); }
             catch {
                 await vscode.workspace.fs.createDirectory(backupFolderUri);
@@ -47,24 +67,29 @@ export class BackupManager {
             const fileExt = parsedPath.ext;
 
             const nextIndex = await this.getNextIndex(backupFolderUri, fileName, fileExt);
+
+            // Nama File: style-mbu-1.css
             const newFileName = `${fileName}-mbu-${nextIndex}${fileExt}`;
             const targetUri = vscode.Uri.joinPath(backupFolderUri, newFileName);
 
             // Copy File
             await vscode.workspace.fs.copy(document.uri, targetUri, { overwrite: false });
 
-            vscode.window.setStatusBarMessage(`MM Backup: Saved ${newFileName}`, 3000);
+            // SIMPAN LOG DESKRIPSI KE JSON
+            await this.saveToLog(backupFolderUri, newFileName, parsedPath.base, finalDesc);
+
+            vscode.window.setStatusBarMessage(`MM Backup: Saved ${newFileName} ("${finalDesc}")`, 4000);
 
         } catch (error: any) {
             vscode.window.showErrorMessage(`Backup Gagal: ${error.message}`);
         }
     }
 
-    // --- FITUR 2: RESTORE (NEW) ---
+    // --- FITUR 2: RESTORE DENGAN PREVIEW DESKRIPSI ---
     public async restoreBackup() {
         const editor = vscode.window.activeTextEditor;
         if (!editor) {
-            vscode.window.showWarningMessage('MM Backup: Buka file asli yang ingin di-restore terlebih dahulu.');
+            vscode.window.showWarningMessage('MM Backup: Buka file asli yang ingin di-restore.');
             return;
         }
 
@@ -76,39 +101,37 @@ export class BackupManager {
         const backupFolderUri = vscode.Uri.joinPath(rootUri, this.backupFolderName);
 
         try {
-            // 1. Cek folder backup ada atau tidak
+            // Cek folder
             try { await vscode.workspace.fs.stat(backupFolderUri); }
             catch {
-                vscode.window.showInformationMessage('MM Backup: Belum ada folder backup ditemukan.');
+                vscode.window.showInformationMessage('MM Backup: Folder backup belum ada.');
                 return;
             }
 
-            // 2. Parse nama file aktif
             const parsedPath = path.parse(document.uri.fsPath);
-            const baseName = parsedPath.name; // style
-            const ext = parsedPath.ext;       // .css
+            const baseName = parsedPath.name;
+            const ext = parsedPath.ext;
 
-            // 3. Cari file backup yang relevan
+            // Cari Backup + Deskripsinya
             const relevantBackups = await this.findBackupsForFile(backupFolderUri, baseName, ext);
 
             if (relevantBackups.length === 0) {
-                vscode.window.showInformationMessage(`MM Backup: Tidak ditemukan backup untuk file "${baseName}${ext}".`);
+                vscode.window.showInformationMessage(`Tidak ada backup untuk file "${baseName}${ext}".`);
                 return;
             }
 
-            // 4. Tampilkan Pilihan (QuickPick)
+            // Tampilkan Pilihan
             const selected = await vscode.window.showQuickPick(relevantBackups, {
-                placeHolder: 'Pilih versi backup yang ingin dikembalikan (Restore)',
-                title: `Restore: ${baseName}${ext}`
+                placeHolder: 'Pilih versi backup untuk di-restore',
+                title: `Restore: ${baseName}${ext}`,
+                matchOnDetail: true // Agar bisa search berdasarkan deskripsi juga!
             });
 
             if (selected) {
-                // 5. Lakukan Restore (Replace content editor)
-                // Kita baca isi file backup
+                // Proses Restore (Undo-able)
                 const backupData = await vscode.workspace.fs.readFile(selected.uri);
                 const backupContent = new TextDecoder().decode(backupData);
 
-                // Kita ganti isi editor (Undo-able)
                 editor.edit(editBuilder => {
                     const fullRange = new vscode.Range(
                         document.positionAt(0),
@@ -117,7 +140,7 @@ export class BackupManager {
                     editBuilder.replace(fullRange, backupContent);
                 }).then(success => {
                     if (success) {
-                        vscode.window.showInformationMessage(`Berhasil restore versi ${selected.version}. Tekan Ctrl+Z jika ingin undo.`);
+                        vscode.window.showInformationMessage(`Restore Berhasil: Versi ${selected.version}. (Ctrl+Z untuk Undo)`);
                     }
                 });
             }
@@ -127,33 +150,80 @@ export class BackupManager {
         }
     }
 
+    // --- LOGIC JSON LOGGING ---
+
+    /**
+     * Menyimpan metadata backup ke file backup-log.json
+     */
+    private async saveToLog(folderUri: vscode.Uri, backupFilename: string, originalFilename: string, desc: string) {
+        const logUri = vscode.Uri.joinPath(folderUri, this.logFileName);
+        let logData: BackupLog = {};
+
+        try {
+            // Baca log lama jika ada
+            const existing = await vscode.workspace.fs.readFile(logUri);
+            logData = JSON.parse(new TextDecoder().decode(existing));
+        } catch {
+            // File belum ada, buat object baru
+        }
+
+        // Update Data
+        logData[backupFilename] = {
+            originalFile: originalFilename,
+            description: desc,
+            timestamp: new Date().toISOString()
+        };
+
+        // Simpan
+        await vscode.workspace.fs.writeFile(logUri, new TextEncoder().encode(JSON.stringify(logData, null, 2)));
+    }
+
+    /**
+     * Membaca log untuk mendapatkan deskripsi
+     */
+    private async getLogData(folderUri: vscode.Uri): Promise<BackupLog> {
+        const logUri = vscode.Uri.joinPath(folderUri, this.logFileName);
+        try {
+            const data = await vscode.workspace.fs.readFile(logUri);
+            return JSON.parse(new TextDecoder().decode(data));
+        } catch {
+            return {};
+        }
+    }
+
     // --- HELPER FUNCTIONS ---
 
-    private async findBackupsForFile(folderUri: vscode.Uri, fileName: string, fileExt: string): Promise<BackupFile[]> {
+    private async findBackupsForFile(folderUri: vscode.Uri, fileName: string, fileExt: string): Promise<BackupFileItem[]> {
         const files = await vscode.workspace.fs.readDirectory(folderUri);
+        const logData = await this.getLogData(folderUri); // Load deskripsi
+
         const escapedName = this.escapeRegExp(fileName);
         const escapedExt = this.escapeRegExp(fileExt);
-
-        // Regex: style-mbu-(\d+).css
         const pattern = new RegExp(`^${escapedName}-mbu-(\\d+)${escapedExt}$`, 'i');
 
-        const backupList: BackupFile[] = [];
+        const backupList: BackupFileItem[] = [];
 
         for (const [name, type] of files) {
-            if (type === vscode.FileType.File) {
+            if (type === vscode.FileType.File && name !== this.logFileName) {
                 const match = name.match(pattern);
                 if (match) {
                     const version = parseInt(match[1], 10);
                     const fileUri = vscode.Uri.joinPath(folderUri, name);
 
-                    // Ambil info tanggal modifikasi
+                    // Ambil Metadata
                     const stat = await vscode.workspace.fs.stat(fileUri);
                     const date = new Date(stat.mtime);
-                    const dateStr = date.toLocaleString(); // Format waktu lokal
+                    const timeStr = date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+                    const dateStr = date.toLocaleDateString();
+
+                    // Ambil Deskripsi dari JSON
+                    const meta = logData[name];
+                    const descriptionText = meta ? meta.description : 'No description';
 
                     backupList.push({
-                        label: `Versi ${version}`, // Text utama di dropdown
-                        description: `(${dateStr}) - ${name}`, // Text kecil di kanan
+                        label: `Versi ${version}`,
+                        description: `${timeStr} - ${dateStr}`,
+                        detail: `📝 ${descriptionText}`, // Deskripsi muncul disini!
                         uri: fileUri,
                         version: version
                     });
@@ -161,7 +231,6 @@ export class BackupManager {
             }
         }
 
-        // Sort descending (Versi terbesar/terbaru di atas)
         return backupList.sort((a, b) => b.version - a.version);
     }
 
